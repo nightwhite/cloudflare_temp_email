@@ -25,18 +25,19 @@ class CustomSMTPHandler:
         return AuthResult(success=True, auth_data=auth_data)
 
     async def handle_DATA(self, server: SMTP, session: Session, envelope: Envelope) -> str:
-        _logger.info(
-            f"handle_DATA from {envelope.mail_from} to {envelope.rcpt_tos}"
-        )
+        _logger.info(f"handle_DATA from {envelope.mail_from} to {envelope.rcpt_tos}")
+
         if not isinstance(session.auth_data, LoginPassword):
             return '530 Authentication required'
         if len(envelope.rcpt_tos) != 1:
             return '500 Only one recipient allowed'
-        # Only one recipient allowed
+
         to_mail = envelope.rcpt_tos[0]
+
         # Parse email
         msg = email.message_from_string(envelope.content)
         content_list = []
+
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
@@ -72,23 +73,37 @@ class CustomSMTPHandler:
 
         if not content_list:
             return '500 Invalid content'
+
+        # Choose preferred body: HTML > longest plain text
         body = max(
             content_list,
             key=lambda x: (x["type"] == "text/html", len(x["value"]))
         )
+
         from_name, _ = email.utils.parseaddr(
             str(email.header.make_header(
                 email.header.decode_header(msg['From'])
             ))
         )
+
         to_mail_map = {}
         for to in str(email.header.make_header(
             email.header.decode_header(msg['To'])
         )).split(","):
             tmp_to_name, tmp_to_mail = email.utils.parseaddr(to)
             to_mail_map[tmp_to_mail] = tmp_to_name
+
         _logger.info(f"Parsed mail from {from_name} to {to_mail_map}")
-        # Send mail
+
+        # Ensure content is always str
+        content_value = body["value"]
+        if isinstance(content_value, bytes):
+            try:
+                content_value = content_value.decode("utf-8")
+            except UnicodeDecodeError:
+                content_value = content_value.decode("latin1", errors="replace")
+
+        # Build payload
         send_body = {
             "token": session.auth_data.password.decode(),
             "from_name": from_name,
@@ -98,20 +113,20 @@ class CustomSMTPHandler:
                 email.header.decode_header(msg['Subject'])
             )),
             "is_html": body["type"] == "text/html",
-            "content": body["value"],
+            "content": content_value,
         }
+
         _logger.info(f"Send mail {dict(send_body, token='***')}")
+
         try:
             res = httpx.post(
                 f"{settings.proxy_url}/external/api/send_mail",
-                json=send_body, headers={
-                    "Content-Type": "application/json"
-                }
+                json=send_body,
+                headers={"Content-Type": "application/json"}
             )
             if res.status_code != 200:
                 _logger.error(
-                    "Failed to send mail "
-                    f"code=[{res.status_code}] text=[{res.text}]"
+                    f"Failed to send mail code=[{res.status_code}] text=[{res.text}]"
                 )
                 return f'500 Internal server error code=[{res.status_code}] text=[{res.text}]'
         except Exception as e:
@@ -121,6 +136,7 @@ class CustomSMTPHandler:
         return '250 OK'
 
 
+# Start server
 handler = CustomSMTPHandler()
 server = Controller(
     handler,
